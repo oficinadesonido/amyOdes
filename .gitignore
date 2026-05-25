@@ -1,0 +1,9 @@
+# amyOdes — excluir material pesado no necesario para compilar el firmware
+# ni para regenerar bancos (amy/headers.py). Reduce el repo.
+tests/
+docs/
+sounds/
+experiments/
+*.mp4
+*.mp3
+*.wasm
