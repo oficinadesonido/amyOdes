@@ -56,12 +56,18 @@ extern const uint16_t pcm_samples;
 
 
 // Set block size and SR. We try for 256/44100, but some platforms don't let us:
+// ODS 2026-08-11: se puede fijar por PROYECTO con -DAMY_BLOCK_SIZE=128 -DBLOCK_SIZE_BITS=7
+// (build_opt.h del sketch). El default NO cambia, así que el resto de proyectos que usan
+// este fork siguen igual. Los dos van juntos: BLOCK_SIZE_BITS es log2 del block size y se
+// usa como desplazamiento en oscillators.c — cambiar uno sin el otro rompe las envolventes.
+#ifndef AMY_BLOCK_SIZE
 #ifdef AMY_DAISY
 #define AMY_BLOCK_SIZE 128
 #define BLOCK_SIZE_BITS 7 // log2 of BLOCK_SIZE
 #else
 #define AMY_BLOCK_SIZE 256 //64
 #define BLOCK_SIZE_BITS 8 // log2 of BLOCK_SIZE //6
+#endif
 #endif
 
 #ifdef AMY_DAISY

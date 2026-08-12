@@ -26,13 +26,23 @@ i2s_chan_handle_t tx_handle;
 i2s_chan_handle_t rx_handle;
 
 
+#ifndef AMY_DMA_DESCS
+#define AMY_DMA_DESCS 2
+#endif
+#ifndef AMY_DMA_FRAMES
+#define AMY_DMA_FRAMES AMY_BLOCK_SIZE
+#endif
+
 #ifndef AMYBOARD
 #warning NOT_AMYBOARD
 // default ESP setup i2s
 amy_err_t esp32_setup_i2s(void) {
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
-    chan_cfg.dma_desc_num = 2;              // número de buffers DMA (2 = mínimo seguro)
-    chan_cfg.dma_frame_num = AMY_BLOCK_SIZE; // samples por buffer (alineado a Amy)
+    // ODS 2026-08-11: overridables por proyecto (build_opt.h). El buffer DMA es la mitad
+    // de la latencia de salida: dma_desc_num × dma_frame_num / SR. Con los defaults (2×256
+    // @44100) son 11.6 ms, más 5.8 del bloque de render = 17.4 ms de tubería.
+    chan_cfg.dma_desc_num = AMY_DMA_DESCS;    // número de buffers DMA (2 = mínimo seguro)
+    chan_cfg.dma_frame_num = AMY_DMA_FRAMES;  // samples por buffer
     if(AMY_HAS_AUDIO_IN) {
         i2s_new_channel(&chan_cfg, &tx_handle, &rx_handle);
     } else {
