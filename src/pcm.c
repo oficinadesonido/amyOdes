@@ -80,9 +80,9 @@ void pcm_note_off(uint16_t osc) {
         memorypcm_preset_t * preset = memorypreset_for_preset_number(synth[osc]->preset);
         if(preset != NULL) {
             length = preset->length;
-        } else {
+        } else if(synth[osc]->preset < pcm_samples) {
             length = pcm_map[synth[osc]->preset].length;
-        }
+        }   // [amyOdes] preset de memoria ya liberado: length 0 → para la nota
 
         if(msynth[osc]->feedback == 0) {
             // Non-looping note: Set phase to the end to cause immediate stop.
@@ -101,6 +101,17 @@ memorypcm_preset_t get_preset_for_preset_number(uint16_t preset_number) {
     memorypcm_preset_t preset;
     memorypcm_preset_t * preset_p = memorypreset_for_preset_number(preset_number);
     if(preset_p == NULL) {
+        // [amyOdes] Un preset de memoria liberado mientras sonaba caía acá y indexaba
+        // pcm_map fuera de rango (lectura salvaje). Degradar a silencio: con length 0
+        // el render apaga la nota en el primer bloque.
+        if(preset_number >= pcm_samples) {
+            preset.sample_ram = (int16_t*)pcm;
+            preset.length = 0; preset.loopstart = 0; preset.loopend = 0;
+            preset.midinote = 60;
+            preset.samplerate = PCM_AMY_SAMPLE_RATE;
+            preset.log2sr = PCM_AMY_LOG2_SAMPLE_RATE;
+            return preset;
+        }
         const pcm_map_t cpreset =  pcm_map[preset_number];
         preset.sample_ram = (int16_t*)pcm + cpreset.offset;
         preset.length = cpreset.length;
@@ -141,7 +152,9 @@ SAMPLE render_pcm(SAMPLE* buf, uint16_t osc) {
         //fprintf(stderr, "render_pcm: time=%.3f preset=%d base_index=%d length=%d loopstart=%d loopend=%d fb=%f is_unset_note_off %d\n", amy_global.total_blocks*AMY_BLOCK_SIZE / (float)AMY_SAMPLE_RATE, synth[osc]->preset, base_index, preset->length, preset->loopstart, preset->loopend, msynth[osc]->feedback, AMY_IS_UNSET(synth[osc]->note_off_clock));
         for(uint16_t i=0; i < AMY_BLOCK_SIZE; i++) {
             SAMPLE frac = S_FRAC_OF_P(synth[osc]->phase, PCM_INDEX_BITS);
-            LUTSAMPLE b = table[base_index];
+            // [amyOdes] no leer fuera de la tabla: con length 0 (preset liberado) esto
+            // era una lectura a ciegas. El bloque de abajo apaga la nota igual.
+            LUTSAMPLE b = (base_index < preset.length) ? table[base_index] : 0;
             LUTSAMPLE c = b;
             if (base_index < preset.length) c = table[base_index + 1];
             SAMPLE sample = L2S(b) + MUL0_SS(L2S(c - b), frac);
@@ -226,6 +239,36 @@ int16_t * pcm_load(uint16_t preset_number, uint32_t length, uint32_t samplerate,
     }
     new_preset_pointer->preset = memory_preset;
     return memory_preset->sample_ram;
+}
+
+// [amyOdes] Igual que pcm_load pero SIN copiar: el preset apunta a una tabla const en
+// flash mapeada. Aloja solo nodo + preset, así que cargar un kit entero cuesta 8 mallocs
+// de ~40 bytes en vez de cientos de KB de memcpy. Devuelve 0 si ok, -1 si no hay RAM.
+int pcm_load_const(uint16_t preset_number, const int16_t *data, uint32_t length, uint32_t samplerate, uint8_t midinote, uint32_t loopstart, uint32_t loopend) {
+    pcm_unload_preset(preset_number);
+    memorypcm_ll_t *new_preset_pointer = malloc_caps(sizeof(memorypcm_ll_t) + sizeof(memorypcm_preset_t),
+						     amy_global.config.ram_caps_sample);
+    if(new_preset_pointer == NULL) {
+        fprintf(stderr, "No RAM left for const sample load\n");
+        return -1;
+    }
+    new_preset_pointer->next = memorypcm_ll_start;
+    memorypcm_ll_start = new_preset_pointer;
+    new_preset_pointer->preset_number = preset_number;
+    memorypcm_preset_t *memory_preset = (memorypcm_preset_t *)(((uint8_t *)new_preset_pointer) + sizeof(memorypcm_ll_t));
+    memory_preset->samplerate = samplerate;
+    memory_preset->log2sr = log2f((float)samplerate / ZERO_LOGFREQ_IN_HZ);
+    memory_preset->midinote = midinote;
+    memory_preset->loopstart = loopstart;
+    memory_preset->length = length;
+    memory_preset->sample_ram = (int16_t *)data;   // flash mapeada: solo se lee
+    if(loopend == 0) {
+        memory_preset->loopend = memory_preset->length-1;
+    } else {
+        memory_preset->loopend = loopend;
+    }
+    new_preset_pointer->preset = memory_preset;
+    return 0;
 }
 
 void pcm_unload_preset(uint16_t preset_number) {
