@@ -55,6 +55,83 @@ void pcm_init() {
 // The number of bits used to hold the table index.
 #define PCM_INDEX_BITS (31 - PCM_INDEX_FRAC_BITS)
 
+// [amyOdes] Declick del redisparo. Una batería vuelve a disparar la misma voz mientras
+// la cola del golpe anterior todavía suena (un bombo de 1 s a 16avos de 120 BPM se
+// redispara a los 125 ms). pcm_note_on llevaba la fase a 0 de golpe y la onda saltaba
+// del valor de la cola al inicio del sample: el clic. Ahora la cola sigue unos ms más,
+// bajando lineal, mientras el golpe nuevo arranca encima (crossfade).
+// Estado por osc: lo que tocó el último bloque (desde dónde fundir) y el fundido en
+// curso. Solo las primeras PCM_DECLICK_OSCS voces; las demás se comportan como antes.
+#define PCM_DECLICK_OSCS    32
+#define PCM_DECLICK_SAMPLES 256     // ~5,8 ms @ 44.1 kHz
+
+typedef struct {
+    const LUTSAMPLE *table;
+    uint32_t length;
+    PHASOR step;
+    SAMPLE amp;
+    int16_t preset;
+    uint32_t block;     // total_blocks del render que dejó estos datos
+    uint8_t valid;      // la voz seguía dentro del sample al terminar ese bloque
+} pcm_last_t;
+
+typedef struct {
+    const LUTSAMPLE *table;
+    uint32_t length;
+    PHASOR phase;
+    PHASOR step;
+    SAMPLE amp;
+    int16_t preset;
+    uint32_t block;     // bloque en que se espera el próximo render del fundido
+    uint16_t left;      // muestras que faltan; 0 = sin fundido
+} pcm_fade_t;
+
+static pcm_last_t pcm_last[PCM_DECLICK_OSCS];
+static pcm_fade_t pcm_fade[PCM_DECLICK_OSCS];
+
+// Se llama en el note-on, ANTES de volver la fase a 0: la cola pasa al fundido.
+static void pcm_declick_capture(uint16_t osc) {
+    if (osc >= PCM_DECLICK_OSCS) return;
+    pcm_last_t *l = &pcm_last[osc];
+    pcm_fade_t *f = &pcm_fade[osc];
+    f->left = 0;
+    // Solo si el bloque anterior sonó de verdad: un dato viejo no se funde.
+    if (!l->valid || amy_global.total_blocks - l->block > 1) return;
+    PHASOR phase = synth[osc]->phase;
+    if ((uint32_t)INT_OF_P(phase, PCM_INDEX_BITS) + 1 >= l->length) return;
+    f->table  = l->table;
+    f->length = l->length;
+    f->phase  = phase;
+    f->step   = l->step;
+    f->amp    = l->amp;
+    f->preset = l->preset;
+    f->block  = amy_global.total_blocks;
+    f->left   = PCM_DECLICK_SAMPLES;
+    l->valid  = 0;
+}
+
+// Suma la cola en fundido a buf. Si el render no fue contiguo, descarta el fundido.
+static void pcm_declick_render(SAMPLE *buf, uint16_t osc) {
+    if (osc >= PCM_DECLICK_OSCS) return;
+    pcm_fade_t *f = &pcm_fade[osc];
+    if (!f->left) return;
+    uint32_t tb = amy_global.total_blocks;
+    if (tb != f->block && tb != f->block + 1) { f->left = 0; return; }
+    f->block = tb + 1;
+    const float inv = 1.0f / (float)PCM_DECLICK_SAMPLES;
+    for (uint16_t i = 0; i < AMY_BLOCK_SIZE && f->left; i++, f->left--) {
+        uint32_t ix = INT_OF_P(f->phase, PCM_INDEX_BITS);
+        if (ix + 1 >= f->length) { f->left = 0; break; }
+        SAMPLE frac = S_FRAC_OF_P(f->phase, PCM_INDEX_BITS);
+        LUTSAMPLE b = f->table[ix];
+        LUTSAMPLE c = f->table[ix + 1];
+        SAMPLE s = L2S(b) + MUL0_SS(L2S(c - b), frac);
+        SAMPLE g = F2S((float)f->left * inv);
+        buf[i] += MUL8_SS(g, MUL4_SS(f->amp, s));
+        f->phase = P_WRAPPED_SUM(f->phase, f->step);
+    }
+}
+
 
 void pcm_note_on(uint16_t osc) {
     if(AMY_IS_SET(synth[osc]->preset)) {
@@ -63,6 +140,7 @@ void pcm_note_on(uint16_t osc) {
             // baked-in PCM - don't overrun.
             if(synth[osc]->preset >= pcm_samples) synth[osc]->preset = 0;
         }
+        pcm_declick_capture(osc);  // [amyOdes] la cola anterior se funde en vez de cortarse
         synth[osc]->phase = 0; // s16.15 index into the table; as if a PHASOR into a 16 bit sample table.
         // Special case: We use the msynth feedback flag to indicate note-off for looping PCM.  As a result, it's explicitly NOT set in amy:hold_and_modify for PCM voices.  Set it here.
         msynth[osc]->feedback = synth[osc]->feedback;
@@ -150,6 +228,7 @@ SAMPLE render_pcm(SAMPLE* buf, uint16_t osc) {
         const LUTSAMPLE* table = preset.sample_ram;
         uint32_t base_index = INT_OF_P(synth[osc]->phase, PCM_INDEX_BITS);
         //fprintf(stderr, "render_pcm: time=%.3f preset=%d base_index=%d length=%d loopstart=%d loopend=%d fb=%f is_unset_note_off %d\n", amy_global.total_blocks*AMY_BLOCK_SIZE / (float)AMY_SAMPLE_RATE, synth[osc]->preset, base_index, preset->length, preset->loopstart, preset->loopend, msynth[osc]->feedback, AMY_IS_UNSET(synth[osc]->note_off_clock));
+        pcm_declick_render(buf, osc);  // [amyOdes]
         for(uint16_t i=0; i < AMY_BLOCK_SIZE; i++) {
             SAMPLE frac = S_FRAC_OF_P(synth[osc]->phase, PCM_INDEX_BITS);
             // [amyOdes] no leer fuera de la tabla: con length 0 (preset liberado) esto
@@ -177,6 +256,16 @@ SAMPLE render_pcm(SAMPLE* buf, uint16_t osc) {
             buf[i] = value;
             if (value < 0) value = -value;
             if (value > max_value) max_value = value;        
+        }
+        if (osc < PCM_DECLICK_OSCS) {  // [amyOdes] desde dónde fundir si llega un redisparo
+            pcm_last_t *l = &pcm_last[osc];
+            l->table  = table;
+            l->length = preset.length;
+            l->step   = step;
+            l->amp    = amp;
+            l->preset = synth[osc]->preset;
+            l->block  = amy_global.total_blocks;
+            l->valid  = base_index < preset.length;
         }
         //printf("render_pcm: osc %d preset %d len %d base_ix %d phase %f step %f tablestep %f amp %f\n",
         //       osc, synth[osc]->preset, preset->length, base_index, P2F(synth[osc]->phase), P2F(step), (1 << PCM_INDEX_BITS) * P2F(step), S2F(msynth[osc]->amp));
@@ -268,6 +357,21 @@ int pcm_load_const(uint16_t preset_number, const int16_t *data, uint32_t length,
         memory_preset->loopend = loopend;
     }
     new_preset_pointer->preset = memory_preset;
+    return 0;
+}
+
+// [amyOdes] ¿Alguna voz sigue leyendo este preset (sonando o en fundido)? Sirve para
+// liberar un kit recién cuando se apagó, en vez de a un tiempo fijo. Se llama desde otra
+// tarea que el render y sin lock: vale para decidir "todavía no", no es exclusión mutua.
+int pcm_preset_in_use(uint16_t preset_number) {
+    memorypcm_preset_t *p = memorypreset_for_preset_number(preset_number);
+    if (p == NULL) return 0;
+    for (uint16_t osc = 0; osc < AMY_OSCS; osc++) {
+        if (osc < PCM_DECLICK_OSCS && pcm_fade[osc].left && (uint16_t)pcm_fade[osc].preset == preset_number) return 1;
+        if (synth[osc] == NULL || synth[osc]->wave != PCM || synth[osc]->status != SYNTH_AUDIBLE) continue;
+        if ((uint16_t)synth[osc]->preset != preset_number) continue;
+        if ((uint32_t)INT_OF_P(synth[osc]->phase, PCM_INDEX_BITS) < p->length) return 1;
+    }
     return 0;
 }
 

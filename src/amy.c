@@ -1161,13 +1161,16 @@ void play_delta(struct delta *d) {
 	    while(AMY_IS_SET(osc)) {
 		synth[osc]->velocity = d->data.f;
 		if (AMY_IS_SET(synth[osc]->chained_osc) || synth[osc]->amp_coefs[COEF_VEL] == 0 || synth[osc]->amp_coefs[COEF_VEL] > AMP_THRESH) {
+		    uint8_t was_audible = (synth[osc]->status == SYNTH_AUDIBLE);  // [amyOdes]
 		    synth[osc]->status = SYNTH_AUDIBLE;
 		    // an osc came in with a note on.
 		    // start the bp clock
 		    synth[osc]->note_on_clock = amy_global.total_blocks*AMY_BLOCK_SIZE; //esp_timer_get_time() / 1000;
 
 		    // if there was a filter active for this voice, reset it
-		    if(synth[osc]->filter_type != FILTER_NONE) reset_filter(osc);
+		    // [amyOdes] salvo un PCM que se redispara sonando: su estado es válido, y ponerlo
+		    // a cero corta la salida del filtro de golpe (clic aunque el sample se funda).
+		    if(synth[osc]->filter_type != FILTER_NONE && !(was_audible && synth[osc]->wave == PCM)) reset_filter(osc);
 		    // We no longer reset the phase here; instead, we reset phase when an oscillator falls silent.
 		    // But if a trigger_phase is set, use that.
 		    if (AMY_IS_SET(synth[osc]->trigger_phase))
@@ -1600,6 +1603,14 @@ void amy_process_event(amy_event *e) {
     }
 }
 
+// [amyOdes] Proceso de la mezcla ANTES de EQ, chorus, eco y reverb (p.ej. un filtro
+// master: una vez sobre L/R en vez de uno por voz). block es planar: L = block[0..n),
+// R = block[n..2n). Devuelve el pico nuevo. El proyecto lo sobrescribe; el default no toca nada.
+__attribute__((weak)) SAMPLE amy_prefx_process(SAMPLE *block, int nframes, SAMPLE max_val) {
+    (void)block; (void)nframes;
+    return max_val;
+}
+
 int16_t * amy_fill_buffer() {
     AMY_PROFILE_START(AMY_FILL_BUFFER)
     #ifdef __EMSCRIPTEN__
@@ -1614,6 +1625,9 @@ int16_t * amy_fill_buffer() {
         for (int16_t i=0; i < AMY_BLOCK_SIZE * AMY_NCHANS; ++i)  fbl[0][i] += fbl[1][i];
         if (core_max[1] > max_val)  max_val = core_max[1];
     #endif
+    // [amyOdes] Hook sobre la mezcla, antes de todos los efectos. Corre también en
+    // silencio: un filtro tiene cola aunque ya no entre señal.
+    max_val = amy_prefx_process(fbl[0], AMY_BLOCK_SIZE, max_val);
     // Apply global processing only if there is some signal.
     if (max_val > 0) {
         // apply the eq filters if there is some signal and EQ is non-default.

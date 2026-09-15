@@ -912,6 +912,8 @@ extern int16_t * pcm_load(uint16_t patch, uint32_t length, uint32_t samplerate, 
 // pcm_unload_preset() libera el nodo y no toca los datos.
 extern int pcm_load_const(uint16_t patch, const int16_t *data, uint32_t length, uint32_t samplerate, uint8_t midinote, uint32_t loopstart, uint32_t loopend);
 extern void pcm_unload_preset(uint16_t patch_number);
+// [amyOdes] 1 si alguna voz sigue leyendo el preset (sonando o en el fundido del declick).
+extern int pcm_preset_in_use(uint16_t patch_number);
 extern void pcm_unload_all_presets();
 
 // filters
