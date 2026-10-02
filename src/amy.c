@@ -1611,6 +1611,16 @@ __attribute__((weak)) SAMPLE amy_prefx_process(SAMPLE *block, int nframes, SAMPL
     return max_val;
 }
 
+// [amyOdes] Simétrico del anterior: proceso DESPUÉS de todos los efectos (EQ, chorus, eco,
+// reverb) y ANTES de la conversión a int16, así que trabaja en el mismo dominio y escala
+// que amy_prefx_process. Lo pide el envío por compuerta de CLAVE: prefx gatea lo que entra
+// a los efectos y guarda el dry, postfx devuelve el dry — y la cola del eco sigue sonando
+// aunque la compuerta se cierre. Hacerlo en el hook de int16 obligaría a replicar la
+// ganancia, el pasa-altos y el clipping suave de la conversión. El default no toca nada.
+__attribute__((weak)) void amy_postfx_process(SAMPLE *block, int nframes) {
+    (void)block; (void)nframes;
+}
+
 int16_t * amy_fill_buffer() {
     AMY_PROFILE_START(AMY_FILL_BUFFER)
     #ifdef __EMSCRIPTEN__
@@ -1668,6 +1678,8 @@ int16_t * amy_fill_buffer() {
             }
         }
     }
+    // [amyOdes] Hook después de todos los efectos, antes de la conversión a int16.
+    amy_postfx_process(fbl[0], AMY_BLOCK_SIZE);
     // global volume is supposed to max out at 10, so scale by 0.1.
     SAMPLE volume_scale = MUL4_SS(F2S(0.1f), F2S(amy_global.volume));
     for(int16_t i=0; i < AMY_BLOCK_SIZE; ++i) {
